@@ -2,10 +2,6 @@
 
 Production-style e-commerce system built with Node.js microservices, API gateway routing, JWT security, Docker orchestration, CI/CD, and DevSecOps scanning.
 
-## What This README Contains (Submission Checklist)
-
-This README includes all key items expected in a full project submission:
-
 - Project overview and architecture
 - Microservice responsibilities and API design
 - Technology stack
