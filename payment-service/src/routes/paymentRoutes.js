@@ -5,9 +5,61 @@ const {
   processPayment,
   getPaymentDetails,
   notifyPayment,
+  createOrder,
+  captureOrder,
+  getPayPalConfig,
 } = require("../controllers/paymentController");
 const authMiddleware = require("../middlewares/auth");
 
+router.get("/paypal/config", authMiddleware, getPayPalConfig);
+router.post("/orders", authMiddleware, createOrder);
+router.post("/orders/:id/capture", authMiddleware, captureOrder);
+
+/**
+ * @swagger
+ * /api/payments/notify:
+ *   post:
+ *     summary: PayPal notification callback
+ *     description: Public callback endpoint used by payment gateway to confirm payment status and trigger internal order payment-status sync.
+ *     tags: [Payments]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/x-www-form-urlencoded:
+ *           schema:
+ *             $ref: '#/components/schemas/PayPalNotifyRequest'
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/PayPalNotifyRequest'
+ *     responses:
+ *       200:
+ *         description: Notification accepted
+ *         content:
+ *           text/plain:
+ *             schema:
+ *               type: string
+ *               example: OK
+ *       400:
+ *         description: Invalid callback payload or signature
+ *         content:
+ *           text/plain:
+ *             schema:
+ *               type: string
+ *               example: Invalid signature
+ *       404:
+ *         description: Payment not found
+ *         content:
+ *           text/plain:
+ *             schema:
+ *               type: string
+ *               example: Payment not found
+ *       500:
+ *         description: Server error
+ *         content:
+ *           text/plain:
+ *             schema:
+ *               type: string
+ */
 router.post("/notify", notifyPayment);
 
 /**

@@ -258,9 +258,9 @@ Main variables used across services:
 - PAYMENT_SERVICE_URL
 - ORDER_SERVICE_URL
 - INTERNAL_SERVICE_KEY
-- PAYHERE_MERCHANT_ID
-- PAYHERE_MERCHANT_SECRET
-- PAYHERE_NOTIFY_URL
+- PAYPAL_CLIENT_ID
+- PAYPAL_SECRECT_KEY
+- PAYPAL_NOTIFY_URL
 
 Use each service's .env.example as the baseline where available.
 

@@ -1,0 +1,100 @@
+services:
+  api-gateway:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./api-gateway/nginx.conf:/etc/nginx/nginx.conf
+    depends_on:
+      - auth-service
+      - product-service
+      - order-service
+      - payment-service
+
+    restart: always
+
+    networks:
+      - e-commerce-network
+
+  auth-service:
+    build: ./auth-service
+    ports:
+      - "5001:5001"
+    environment:
+      - PORT=5001
+      - MONGODB_URI=mongodb://mongo:27017/auth
+      - JWT_SECRET=mysuperkey123
+    depends_on:
+      - mongo
+    networks:
+      - e-commerce-network
+
+  product-service:
+    build: ./product-service
+    ports:
+      - "5002:5002"
+    environment:
+      - PORT=5002
+      - MONGODB_URI=mongodb://mongo:27017/products
+      - JWT_SECRET=mysuperkey123
+      - AUTH_SERVICE_URL=http://auth-service:5001
+    depends_on:
+      - mongo
+      - auth-service
+    networks:
+      - e-commerce-network
+
+  order-service:
+    build: ./order-service
+    ports:
+      - "5003:5003"
+    environment:
+      - PORT=5003
+      - MONGODB_URI=mongodb://mongo:27017/orders
+      - JWT_SECRET=mysuperkey123
+      - INTERNAL_SERVICE_KEY=internal-service-key-123
+      - AUTH_SERVICE_URL=http://auth-service:5001
+      - PRODUCT_SERVICE_URL=http://product-service:5002
+      - PAYMENT_SERVICE_URL=http://payment-service:5004
+    depends_on:
+      - mongo
+    networks:
+      - e-commerce-network
+
+  payment-service:
+    build: ./payment-service
+    ports:
+      - "5004:5004"
+    environment:
+      - PORT=5004
+      - MONGODB_URI=mongodb://mongo:27017/payments
+      - JWT_SECRET=mysuperkey123
+      - INTERNAL_SERVICE_KEY=internal-service-key-123
+      - AUTH_SERVICE_URL=http://auth-service:5001
+      - ORDER_SERVICE_URL=http://order-service:5003
+      - PAYMENT_PROVIDER=paypal
+      - PAYPAL_CLIENT_ID=your_sandbox_client_id
+      - PAYPAL_CLIENT_SECRET=your_sandbox_client_secret
+      - PAYPAL_SANDBOX=true
+      - PAYPAL_CURRENCY=USD
+    depends_on:
+      - mongo
+    networks:
+      - e-commerce-network
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - e-commerce-network
+
+networks:
+  e-commerce-network:
+    driver: bridge
+
+volumes:
+  mongo-data:
+    driver: local
