@@ -1,9 +1,11 @@
-const crypto = require("crypto");
 const axios = require("axios");
+const {
+  Client,
+  Environment,
+  OrdersController,
+} = require("@paypal/paypal-server-sdk");
 const Payment = require("../models/Payment");
 
-const md5 = (value) =>
-  crypto.createHash("md5").update(String(value)).digest("hex").toUpperCase();
 const formatAmount = (value) => Number(value).toFixed(2);
 
 const normalizeEnvValue = (value = "") => {
@@ -20,12 +22,23 @@ const normalizeEnvValue = (value = "") => {
 const parseBoolean = (value) =>
   ["true", "1", "yes", "y"].includes(normalizeEnvValue(value).toLowerCase());
 
+const getPayPalClientId = () =>
+  normalizeEnvValue(process.env.PAYPAL_CLIENT_ID || "");
+
+const resolveMerchantId = () =>
+  normalizeEnvValue(
+    process.env.PAYPAL_CLIENT_ID || process.env.PAYPAL_MERCHANT_ID || "",
+  );
+
 const resolveMerchantSecret = () => {
   const rawSecret = normalizeEnvValue(
-    process.env.PAYHERE_MERCHANT_SECRET || "",
+    process.env.PAYPAL_SECRECT_KEY ||
+      process.env.PAYPAL_SECRET_KEY ||
+      process.env.PAYPAL_MERCHANT_SECRET ||
+      "",
   );
   const isBase64Secret = parseBoolean(
-    process.env.PAYHERE_MERCHANT_SECRET_IS_BASE64 || "false",
+    process.env.PAYPAL_MERCHANT_SECRET_IS_BASE64 || "false",
   );
 
   if (!isBase64Secret) {
@@ -39,15 +52,38 @@ const resolveMerchantSecret = () => {
   }
 };
 
-const buildPayHereHash = ({
-  merchantId,
-  merchantSecret,
-  orderId,
-  amount,
-  currency,
-}) => {
-  const secretHash = md5(merchantSecret);
-  return md5(`${merchantId}${orderId}${amount}${currency}${secretHash}`);
+const getPayPalClient = () =>
+  new Client({
+    clientCredentialsAuthCredentials: {
+      oAuthClientId: getPayPalClientId(),
+      oAuthClientSecret: resolveMerchantSecret(),
+    },
+    environment: Environment.Sandbox,
+    timeout: 0,
+  });
+
+const getPayPalOrdersController = () => new OrdersController(getPayPalClient());
+
+const extractPayPalResult = (response) =>
+  response?.result || response?.body || response?.data || response;
+
+const getPaymentProvider = () =>
+  normalizeEnvValue(process.env.PAYMENT_PROVIDER || "auto").toLowerCase();
+
+const isInvalidPayPalSecret = (merchantSecret) =>
+  !merchantSecret ||
+  merchantSecret === "replace-with-your-paypal-secret" ||
+  merchantSecret.toLowerCase().includes("replace-with-your");
+
+const shouldUseMockProvider = ({ merchantId, merchantSecret }) => {
+  const paymentProvider = getPaymentProvider();
+  if (paymentProvider === "mock") {
+    return true;
+  }
+  if (paymentProvider === "paypal") {
+    return false;
+  }
+  return !merchantId || isInvalidPayPalSecret(merchantSecret);
 };
 
 const processPayment = async (req, res) => {
@@ -67,79 +103,65 @@ const processPayment = async (req, res) => {
       });
     }
 
-    const merchantId = normalizeEnvValue(process.env.PAYHERE_MERCHANT_ID || "");
+    const merchantId = resolveMerchantId();
     const merchantSecret = resolveMerchantSecret();
+    const paymentProvider = getPaymentProvider();
+    const normalizedAmount = formatAmount(amount);
+    const currency = normalizeEnvValue(process.env.PAYPAL_CURRENCY || "LKR");
+    const useMockProvider = shouldUseMockProvider({
+      merchantId,
+      merchantSecret,
+    });
 
     if (
-      !merchantId ||
-      !merchantSecret ||
-      merchantSecret === "replace-with-your-payhere-secret" ||
-      merchantSecret.toLowerCase().includes("replace-with-your")
+      paymentProvider === "paypal" &&
+      (!merchantId || isInvalidPayPalSecret(merchantSecret))
     ) {
       return res.status(500).json({
         success: false,
         message:
-          "Invalid PayHere credentials. Set PAYHERE_MERCHANT_ID and PAYHERE_MERCHANT_SECRET in payment-service.",
+          "Invalid PayPal credentials. Set PAYPAL_CLIENT_ID and PAYPAL_SECRECT_KEY (or PAYPAL_MERCHANT_ID and PAYPAL_MERCHANT_SECRET) in payment-service.",
       });
     }
-
-    const normalizedAmount = formatAmount(amount);
-    const currency = normalizeEnvValue(process.env.PAYHERE_CURRENCY || "LKR");
 
     const payment = await Payment.create({
       orderId,
       orderNumber,
       userId: req.user.userId,
       amount: Number(normalizedAmount),
+      currency,
       paymentMethod,
       status: "pending",
       transactionDetails: {
-        processor: "payhere",
+        processor: useMockProvider ? "sandbox-mock" : "paypal",
         initiatedAt: new Date().toISOString(),
+        mode: "sandbox",
       },
     });
 
-    const firstName =
-      customer.firstName || req.user.name?.split(" ")?.[0] || "Customer";
-    const lastName =
-      customer.lastName ||
-      req.user.name?.split(" ")?.slice(1).join(" ") ||
-      "User";
-    const email = customer.email || req.user.email;
+    if (useMockProvider) {
+      payment.status = "completed";
+      payment.transactionDetails = {
+        ...(payment.transactionDetails || {}),
+        transactionId: `mock_${Date.now()}`,
+        mode: "sandbox",
+        completedAt: new Date().toISOString(),
+      };
+      await payment.save();
 
-    const checkoutData = {
-      sandbox: parseBoolean(process.env.PAYHERE_SANDBOX || "true"),
-      merchant_id: merchantId,
-      return_url:
-        normalizeEnvValue(process.env.PAYHERE_RETURN_URL) ||
-        "http://localhost/checkout?payment=success",
-      cancel_url:
-        normalizeEnvValue(process.env.PAYHERE_CANCEL_URL) ||
-        "http://localhost/checkout?payment=cancelled",
-      notify_url:
-        normalizeEnvValue(process.env.PAYHERE_NOTIFY_URL) ||
-        "http://localhost/api/payments/notify",
-      order_id: payment.paymentId,
-      items: `Order ${orderNumber}`,
-      amount: normalizedAmount,
-      currency,
-      first_name: firstName,
-      last_name: lastName,
-      email,
-      phone: customer.phone || "0770000000",
-      address: customer.address || "N/A",
-      city: customer.city || "Colombo",
-      country: customer.country || "Sri Lanka",
-      hash: buildPayHereHash({
-        merchantId,
-        merchantSecret,
-        orderId: payment.paymentId,
-        amount: normalizedAmount,
-        currency,
-      }),
-      custom_1: orderId,
-      custom_2: orderNumber,
-    };
+      return res.status(200).json({
+        success: true,
+        message: "Sandbox payment completed successfully",
+        data: {
+          paymentId: payment.paymentId,
+          status: payment.status,
+          amount: payment.amount,
+          orderNumber: payment.orderNumber,
+          paymentGateway: "mock",
+          checkoutData: null,
+        },
+      });
+    }
 
     return res.status(200).json({
       success: true,
@@ -149,8 +171,13 @@ const processPayment = async (req, res) => {
         status: payment.status,
         amount: payment.amount,
         orderNumber: payment.orderNumber,
-        paymentGateway: "payhere",
-        checkoutData,
+        paymentGateway: "paypal",
+        checkoutData: {
+          paymentId: payment.paymentId,
+          amount: normalizedAmount,
+          currency,
+          mode: "sandbox",
+        },
       },
     });
   } catch (error) {
@@ -164,17 +191,10 @@ const processPayment = async (req, res) => {
 
 const notifyPayment = async (req, res) => {
   try {
-    const {
-      merchant_id: merchantId,
-      order_id: paymentId,
-      payhere_amount: paidAmount,
-      payhere_currency: paidCurrency,
-      status_code: statusCode,
-      md5sig,
-      payment_id: gatewayPaymentId,
-    } = req.body;
+    const { paymentId, paypalOrderId, status, paidAmount, paidCurrency } =
+      req.body;
 
-    if (!paymentId || !statusCode) {
+    if (!paymentId || !status) {
       return res.status(400).send("Invalid notification payload");
     }
 
@@ -183,21 +203,12 @@ const notifyPayment = async (req, res) => {
       return res.status(404).send("Payment not found");
     }
 
-    const merchantSecret = resolveMerchantSecret();
-    if (merchantSecret && merchantId && paidAmount && paidCurrency && md5sig) {
-      const localSig = md5(
-        `${merchantId}${paymentId}${paidAmount}${paidCurrency}${statusCode}${md5(merchantSecret)}`,
-      );
-      if (localSig !== String(md5sig).toUpperCase()) {
-        return res.status(400).send("Invalid signature");
-      }
-    }
-
-    payment.status = String(statusCode) === "2" ? "completed" : "failed";
+    payment.status =
+      String(status).toUpperCase() === "COMPLETED" ? "completed" : "failed";
     payment.transactionDetails = {
       ...(payment.transactionDetails || {}),
-      gatewayPaymentId,
-      statusCode,
+      paypalOrderId,
+      status,
       paidAmount,
       paidCurrency,
       notifiedAt: new Date().toISOString(),
@@ -233,6 +244,166 @@ const notifyPayment = async (req, res) => {
   }
 };
 
+const createOrder = async (req, res) => {
+  try {
+    const { paymentId } = req.body;
+
+    if (!paymentId) {
+      return res.status(400).json({
+        success: false,
+        message: "paymentId is required",
+      });
+    }
+
+    const payment = await Payment.findOne({ paymentId });
+    if (!payment) {
+      return res.status(404).json({
+        success: false,
+        message: "Payment not found",
+      });
+    }
+
+    const ordersController = getPayPalOrdersController();
+    const response = await ordersController.createOrder({
+      body: {
+        intent: "CAPTURE",
+        purchase_units: [
+          {
+            reference_id: payment.paymentId,
+            description: `Order ${payment.orderNumber}`,
+            amount: {
+              currency_code: String(payment.currency || "USD").toUpperCase(),
+              value: formatAmount(payment.amount),
+            },
+          },
+        ],
+      },
+      prefer: "return=representation",
+    });
+
+    const order = extractPayPalResult(response);
+
+    payment.transactionDetails = {
+      ...(payment.transactionDetails || {}),
+      paypalOrderId: order?.id,
+      createdAt: new Date().toISOString(),
+    };
+    await payment.save();
+
+    return res.status(200).json({
+      id: order?.id,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to create PayPal order",
+      error: error.message,
+    });
+  }
+};
+
+const captureOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { paymentId } = req.body;
+
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: "PayPal order id is required",
+      });
+    }
+
+    const payment = await Payment.findOne(
+      paymentId
+        ? { paymentId }
+        : {
+            "transactionDetails.paypalOrderId": id,
+          },
+    );
+
+    if (!payment) {
+      return res.status(404).json({
+        success: false,
+        message: "Payment not found",
+      });
+    }
+
+    const ordersController = getPayPalOrdersController();
+    const response = await ordersController.captureOrder({
+      id,
+      prefer: "return=representation",
+    });
+
+    const capturedOrder = extractPayPalResult(response);
+    const captureStatus = String(capturedOrder?.status || "").toUpperCase();
+
+    payment.status = captureStatus === "COMPLETED" ? "completed" : "failed";
+    payment.transactionDetails = {
+      ...(payment.transactionDetails || {}),
+      paypalOrderId: id,
+      captureStatus,
+      captureResponse: capturedOrder,
+      capturedAt: new Date().toISOString(),
+    };
+    await payment.save();
+
+    if (process.env.ORDER_SERVICE_URL && process.env.INTERNAL_SERVICE_KEY) {
+      try {
+        await axios.post(
+          `${process.env.ORDER_SERVICE_URL}/api/orders/internal/payment-status`,
+          {
+            orderId: payment.orderId,
+            paymentId: payment.paymentId,
+            paymentStatus: payment.status,
+          },
+          {
+            headers: {
+              "x-service-key": process.env.INTERNAL_SERVICE_KEY,
+            },
+          },
+        );
+      } catch (updateError) {
+        console.error(
+          "Failed to update order payment status:",
+          updateError.message,
+        );
+      }
+    }
+
+    return res.status(200).json(capturedOrder);
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to capture PayPal order",
+      error: error.message,
+    });
+  }
+};
+
+const getPayPalConfig = async (req, res) => {
+  try {
+    const clientId = getPayPalClientId();
+    if (!clientId) {
+      return res.status(500).json({
+        success: false,
+        message: "PAYPAL_CLIENT_ID is not configured",
+      });
+    }
+
+    return res.status(200).json({
+      clientId,
+      currency: normalizeEnvValue(process.env.PAYPAL_CURRENCY || "USD"),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch PayPal config",
+      error: error.message,
+    });
+  }
+};
+
 const getPaymentDetails = async (req, res) => {
   try {
     const payment = await Payment.findOne({ paymentId: req.params.paymentId });
@@ -261,4 +432,7 @@ module.exports = {
   processPayment,
   notifyPayment,
   getPaymentDetails,
+  createOrder,
+  captureOrder,
+  getPayPalConfig,
 };
